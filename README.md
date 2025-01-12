@@ -15,7 +15,7 @@ An automated trading bot that combines social sentiment analysis with technical 
   - Moving Average Convergence Divergence (MACD)
   - Bollinger Bands
   - Price Momentum
-- Advanced Position Management:
+- Position Management:
   - Side-specific technical analysis for longs/shorts
   - Momentum-based entry and exit criteria
   - Dynamic exposure management
