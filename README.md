@@ -1,4 +1,4 @@
-# AI Trading Bot
+# Hype Trading Bot
 
 An automated trading bot that combines social sentiment analysis with technical indicators and momentum to identify and trade potential breakout stocks.
 
