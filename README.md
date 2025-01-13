@@ -36,12 +36,8 @@ An automated trading bot that combines social sentiment analysis with technical 
 
 ## Setup
 
-1. Install required packages:
-```bash
-pip install -r requirements.txt
-```
 
-2. Install TA-Lib:
+1. Install TA-Lib: (C library must be installed before python "ta-lib" wrapper)
 - On Ubuntu/Debian:
 ```bash
 sudo apt-install ta-lib
@@ -50,6 +46,13 @@ sudo apt-install ta-lib
 ```bash
 brew install ta-lib
 ```
+
+2. Install required packages:
+```bash
+pip install -r requirements.txt
+```
+
+
 
 3. Create an Alpaca paper trading account at https://app.alpaca.markets/signup
    - Get your API key and secret from the dashboard
@@ -69,6 +72,7 @@ ALPACA_SECRET_KEY=your_secret_key_here
 
 Run the main trading script:
 ```bash
+source .env
 python trader.py
 ```
 
