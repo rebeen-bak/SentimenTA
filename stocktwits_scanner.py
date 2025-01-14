@@ -12,17 +12,12 @@ class StocktwitsScanner:
         }
     
     def get_trending_stocks(self, limit=20):
-        """
-        Get trending stocks from Stocktwits
-        Returns DataFrame with columns: ticker, watchlist_count, sentiment, source, timestamp
-        """
+        """Get trending stocks from Stocktwits"""
         try:
-            print("Fetching Stocktwits trending data...")
             url = 'https://api.stocktwits.com/api/2/trending/symbols.json'
             response = requests.get(url, headers=self.headers)
             
             if response.status_code != 200:
-                print(f"Error: Stocktwits API returned status code {response.status_code}")
                 return pd.DataFrame()
             
             try:
@@ -34,7 +29,7 @@ class StocktwitsScanner:
                 if df.empty:
                     return df
                 
-                # Rename columns to match our schema
+                # Rename columns
                 df = df.rename(columns={
                     'symbol': 'ticker',
                     'watchlist_count': 'mentions'
@@ -52,7 +47,6 @@ class StocktwitsScanner:
                             data = response.json()
                             messages = data.get('messages', [])
                             if messages:
-                                # Count sentiment in last 100 messages
                                 bullish = 0
                                 bearish = 0
                                 total = 0
@@ -68,26 +62,18 @@ class StocktwitsScanner:
                                                 bearish += 1
                                 
                                 if total > 0:
-                                    bullish_ratio = bullish / total
-                                    print(f"{ticker}: {bullish} bullish, {bearish} bearish, {total-bullish-bearish} neutral ({bullish_ratio:.2%} bullish)")
-                                    return bullish_ratio
-                        return 0.5  # Neutral if no data
-                    except Exception as e:
-                        print(f"Error getting sentiment for {ticker}: {str(e)}")
+                                    return bullish / total
+                        return 0.5
+                    except:
                         return 0.5
                 
-                print("\nGetting message sentiment...")
                 df['bullish_ratio'] = df['ticker'].apply(get_message_sentiment)
                 
-                # Filter for minimum watchers to avoid penny stocks
-                min_watchers = 1000
-                df = df[df['mentions'] >= min_watchers]
-                print(f"\nFound {len(df)} stocks with >{min_watchers:,} watchers")
-                
-                # Filter for >60% bullish
+                # Filter for minimum watchers and bullish ratio
+                df = df[df['mentions'] >= 1000]
                 df = df[df['bullish_ratio'] > 0.6]
+                
                 if df.empty:
-                    print("No stocks found with >60% bullish sentiment")
                     return df
                 
                 # Calculate score as log10(watchers) * bullish_ratio
@@ -98,44 +84,15 @@ class StocktwitsScanner:
                 df = df.sort_values('score', ascending=False)
                 df['rank'] = range(1, len(df) + 1)
                 
-                print(f"\nFound {len(df)} stocks with >60% bullish sentiment")
-                
-                # Show analysis
-                print("\nStock Analysis:")
-                for _, row in df.iterrows():
-                    print(f"{row['ticker']}: {row['mentions']:,} watchers (log10={row['log_mentions']:.2f}), {row['bullish_ratio']:.2%} bullish, score={row['score']:.2f}")
-                
                 # Add source and timestamp
                 df['source'] = 'stocktwits'
                 df['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 
                 # Get top N stocks
-                df = df.head(limit)
+                return df.head(limit)
                 
-                print(f"Found {len(df)} trending stocks from Stocktwits")
-                return df
-                
-            except json.JSONDecodeError:
-                print("Error: Invalid JSON response from Stocktwits")
+            except:
                 return pd.DataFrame()
                 
-        except Exception as e:
-            print(f"Error fetching Stocktwits data: {str(e)}")
+        except:
             return pd.DataFrame()
-
-def main():
-    scanner = StocktwitsScanner()
-    df = scanner.get_trending_stocks()
-    
-    if not df.empty:
-        print("\nTop Trending Stocks on Stocktwits:")
-        for _, row in df.iterrows():
-            print(f"\n{row['ticker']} (Rank {row['rank']}):")
-            print(f"Watchlist Count: {row['mentions']:,} (log10={row['log_mentions']:.2f})")
-            print(f"Bullish Ratio: {row['bullish_ratio']:.1%}")
-            print(f"Score: {row['score']:.2f}")
-    else:
-        print("No trending stocks found")
-
-if __name__ == "__main__":
-    main()

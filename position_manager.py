@@ -46,9 +46,22 @@ class PositionManager:
         self.position_step_size = 0.02  # 2% per trade for gradual building
         self.max_total_exposure = 1.6  # 160% total exposure (80% long + 80% short)
         
-        # Initialize current positions and clean up any old pending orders
-        self.trading_client.cancel_orders()  # Cancel any old pending orders
+        # Initialize current positions and pending orders
         self.update_positions()
+        self.update_pending_orders()
+    
+    def update_pending_orders(self):
+        """Update list of pending orders"""
+        try:
+            orders = self.trading_client.get_orders()
+            self.pending_orders = [{
+                'symbol': order.symbol,
+                'shares': float(order.qty),
+                'side': order.side,
+                'order_id': order.id
+            } for order in orders]
+        except Exception as e:
+            print(f"Error updating orders: {str(e)}")
     
     def get_account_info(self):
         """Get account information"""
@@ -237,35 +250,12 @@ class PositionManager:
         )
         
         try:
-            print(f"\nSubmitting order to Alpaca:")
-            print(f"Symbol: {symbol}")
-            print(f"Shares: {shares}")
-            print(f"Side: {side}")
-            print(f"Time in force: {TimeInForce.DAY}")
-            
+            # Place order
             order = self.trading_client.submit_order(order_details)
             
-            print("\nOrder response from Alpaca:")
-            print(f"Order ID: {order.id}")
-            print(f"Status: {order.status}")
-            print(f"Created at: {order.created_at}")
-            
-            # Verify order was created
-            try:
-                order_status = self.trading_client.get_order_by_id(order.id)
-                print(f"Order verification - Status: {order_status.status}")
-                
-                if order_status.status == 'accepted':
-                    # Track pending order
-                    self.pending_orders.append({
-                        'symbol': symbol,
-                        'shares': shares,
-                        'side': side,
-                        'order_id': order.id
-                    })
-                    print("Order accepted - will execute when market opens")
-            except Exception as e:
-                print(f"Error verifying order: {str(e)}")
+            # Update pending orders list
+            self.update_pending_orders()
+            print(f"Order queued: {shares} shares of {symbol}")
             
             return order
         except Exception as e:
@@ -278,23 +268,9 @@ class PositionManager:
         """Close an existing position"""
         try:
             order = self.trading_client.close_position(symbol)
-            print(f"\nClosing position in {symbol}:")
-            print(f"Order ID: {order.id}")
-            print(f"Status: {order.status}")
-            print(f"Created at: {order.created_at}")
-            
-            # Verify order was created
-            try:
-                order_status = self.trading_client.get_order_by_id(order.id)
-                print(f"Order verification - Status: {order_status.status}")
-                
-                if order_status.status == 'accepted':
-                    print("Close order accepted - will execute when market opens")
-                    self.pending_closes.add(symbol)
-                else:
-                    print(f"Warning: Close order status is {order_status.status}")
-            except Exception as e:
-                print(f"Error verifying order: {str(e)}")
+            if order.status == 'accepted':
+                self.pending_closes.add(symbol)
+                print(f"Close order queued: {symbol}")
                 
         except Exception as e:
             print(f"\nError closing position in {symbol}:")
