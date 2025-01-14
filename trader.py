@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 from alpaca.trading.enums import OrderSide
@@ -43,206 +44,150 @@ class Trader:
                 print(f"Could not get technical data for {symbol} - maintaining position")
     
     def find_new_opportunities(self, analyzer):
-        """Second step: Find and execute new trading opportunities"""
-        print("\nStep 2: Finding New Opportunities...")
+        """Find and execute new trading opportunities"""
+        print("\nFinding New Opportunities...")
         
-        # Get social sentiment data
+        # Get ranked stocks from social scanner
         scanner = SocialScanner()
-        print("\nFinding trending social stocks...")
+        print("\nFinding and ranking social stocks...")
         df = scanner.get_trending_stocks()
         
         if df.empty:
-            print("No trending stocks found today.")
+            print("No trending stocks found.")
             return
         
-        print("\nAnalyzing technical indicators...")
-        analyzed_stocks = []
+        # Get current positions and pending orders
+        current_positions = set(self.position_manager.positions.keys())
+        pending_orders = {order['symbol'] for order in self.position_manager.pending_orders}
         
-        for _, stock in df.iterrows():
+        # Get top 10 stocks by final rank
+        top_stocks = df.head(10)
+        target_symbols = set(top_stocks['ticker'])
+        
+        # Check positions that fell out of top 10
+        for symbol in current_positions:
+            if symbol not in target_symbols:
+                print(f"\n{symbol} fell out of top 10, checking technicals...")
+                technical_data = analyzer.analyze_stock(symbol)
+                if technical_data:
+                    if technical_data['score'] < 0.4:  # Below 40% technical score
+                        print(f"Closing {symbol} - weak technicals: {technical_data['score']:.2f}")
+                        self.position_manager.close_position(symbol)
+                    else:
+                        print(f"Keeping {symbol} - good technicals: {technical_data['score']:.2f}")
+        
+        # Enter new positions for stocks in top 10
+        print("\nChecking for new positions (8% each):")
+        for _, stock in top_stocks.iterrows():
             ticker = stock['ticker']
-            # Skip crypto tickers
-            if '.X' in ticker:
+            
+            # Skip if we already have position
+            if ticker in current_positions:
+                print(f"\nSkipping {ticker} - already in portfolio")
                 continue
                 
-            print(f"\nAnalyzing {ticker}...")
-            # Initial neutral analysis for screening
-            technical_data = analyzer.analyze_stock(ticker, None)
-            if technical_data:
-                analyzed_stocks.append({
-                    'ticker': ticker,
-                    'price': technical_data['price'],
-                    'social_score': stock['score'],
-                    'sentiment': stock['sentiment'],
-                    'mentions': stock['mentions'],
-                    'technical_score': technical_data['score'],
-                    'technical_signals': technical_data['signals'],
-                    'momentum': technical_data['momentum'],
-                    'sources': stock['source']
-                })
-        
-        if not analyzed_stocks:
-            print("No stocks passed technical analysis.")
-            return
-        
-        # Convert scores to percentile ranks
-        scores = [stock['social_score'] for stock in analyzed_stocks]
-        social_ranks = pd.Series(scores).rank(pct=True)
-        
-        scores = [stock['technical_score'] for stock in analyzed_stocks]
-        technical_ranks = pd.Series(scores).rank(pct=True)
-        
-        # Calculate combined score using percentile ranks
-        for i, stock in enumerate(analyzed_stocks):
-            stock['social_percentile'] = social_ranks[i]
-            stock['technical_percentile'] = technical_ranks[i]
-            stock['combined_score'] = (
-                social_ranks[i] * 0.4 +      # 40% weight on social metrics
-                technical_ranks[i] * 0.6      # 60% weight on technical analysis
+            # Skip if we already have a pending order (prevent duplicate after-hours orders)
+            if ticker in pending_orders:
+                print(f"\nSkipping {ticker} - order already queued")
+                print(f"Will execute when market opens")
+                continue
+                
+            # Get latest price and verify technicals
+            technical_data = analyzer.analyze_stock(ticker)
+            if not technical_data:
+                print(f"Could not get price data for {ticker}")
+                continue
+            
+            price = technical_data['price']
+            print(f"\n{ticker} (Final Rank: {stock['final_rank']:.1f}):")
+            print(f"Sentiment Rank: {stock['sentiment_rank']:.1f}")
+            print(f"Technical Rank: {stock['ta_rank']}")
+            print(f"Current Price: ${price:.2f}")
+            
+            # Verify technicals still good
+            if technical_data['score'] < 0.4:  # Below 40% technical score
+                print(f"Skipping {ticker} - weak technicals: {technical_data['score']:.2f}")
+                continue
+            
+            # Calculate 8% position
+            shares, allow_trade = self.position_manager.calculate_target_position(
+                ticker,
+                price,
+                OrderSide.BUY,
+                target_pct=0.08  # 8% position size
             )
-        
-        # Sort stocks by combined score
-        analyzed_stocks.sort(key=lambda x: x['combined_score'], reverse=True)
-        
-        # Check exposure before proceeding
-        account = self.position_manager.get_account_info()
-        available_equity = float(account['equity'])
-        current_exposure = sum(p.get_exposure(available_equity) 
-                             for p in self.position_manager.positions.values())
-        
-        # More conservative exposure limit for new positions
-        if current_exposure >= self.position_manager.max_total_exposure * 0.9:  # 90% of max
-            print(f"\nNear maximum exposure ({current_exposure:.1%}) - no new positions")
-            print(f"Max allowed: {self.position_manager.max_total_exposure * 100:.0f}%")
-            print("Focusing on managing existing positions")
-            return
             
-        remaining_exposure = self.position_manager.max_total_exposure - current_exposure
-        print(f"\nCurrent exposure: {current_exposure:.1%}")
-        print(f"Remaining exposure available: {remaining_exposure:.1%}")
+            if allow_trade and shares > 0:
+                print(f"Placing order for {shares} shares (8% position)")
+                order = self.position_manager.place_order(
+                    ticker,
+                    shares,
+                    side=OrderSide.BUY
+                )
+                if order:
+                    print(f"Order placed successfully: {order.id}")
+            else:
+                print("Skipping trade - position limits reached")
+    
+    def should_exit_position(self, symbol, technical_data):
+        """Determine if we should exit a position based only on technicals"""
+        # Exit if:
+        # 1. Strong bearish trend (price below both MAs)
+        # 2. Strong bearish MACD
+        # 3. Large 24h loss (>5%)
+        # Get values from technical data
+        price = technical_data['price']
+        signals = technical_data['signals']
+        momentum = technical_data['momentum']
         
-        # Second pass: Process new opportunities
-        print("\nProcessing trading opportunities...")
+        # Parse moving averages from signals
+        below_both_mas = any('below both MAs' in signal for signal in signals)
         
-        # Use very strict thresholds when near capacity
-        if current_exposure > self.position_manager.max_total_exposure * 0.7:  # Above 70% capacity
-            long_threshold = 0.80  # Only exceptional longs
-            short_threshold = 0.20  # Only exceptional shorts
-            print("Using stricter thresholds due to high exposure")
-        else:
-            long_threshold = 0.70  # Normal thresholds
-            short_threshold = 0.30
+        # Parse MACD from signals
+        strong_bearish_macd = any('Strong bearish MACD' in signal for signal in signals)
         
-        # Get current position symbols
-        current_positions = set(self.position_manager.positions.keys())
+        exit_signals = []
         
-        # Filter candidates with strict thresholds
-        long_candidates = [s for s in analyzed_stocks 
-                         if s['combined_score'] > long_threshold 
-                         and s['ticker'] not in current_positions][:10]
-        
-        short_candidates = [s for s in analyzed_stocks 
-                          if s['combined_score'] < short_threshold 
-                          and s['ticker'] not in current_positions][-10:]
-        short_candidates.reverse()  # Show worst first
-        
-        # Ensure no overlap between long and short lists
-        long_symbols = set(s['ticker'] for s in long_candidates)
-        short_candidates = [s for s in short_candidates if s['ticker'] not in long_symbols]
-        
-        print("\nLong Opportunities (Top 10):")
-        for stock in long_candidates:
-            print(f"\n{stock['ticker']}:")
-            print(f"Current Price: ${stock['price']:.2f}")
-            print(f"Social Metrics:")
-            print(f"  Raw Score: {stock['social_score']:.3f}")
-            print(f"  Percentile: {stock['social_percentile']:.1%}")
-            print(f"  Mentions: {stock['mentions']}")
-            print(f"  Sentiment: {stock['sentiment']:.3f}")
-            print(f"  Sources: {stock['sources']}")
+        if below_both_mas:
+            exit_signals.append("Price below both moving averages")
             
-            # Re-analyze with long bias
-            technical_data = analyzer.analyze_stock(stock['ticker'], OrderSide.BUY)
-            if technical_data:
-                print(f"Technical Analysis (Long Bias):")
-                print(f"  Score: {technical_data['score']:.3f}")
-                print(f"  Momentum: {technical_data['momentum']:.1f}%")
-                print("  Signals:")
-                for signal in technical_data['signals']:
-                    print(f"    - {signal}")
-                
-                print(f"Combined Score (Percentile): {stock['combined_score']:.1%}")
-                
-                if technical_data['momentum'] > 0:  # Only long if momentum is positive
-                    shares, allow_trade = self.position_manager.calculate_target_position(
-                        stock['ticker'], 
-                        stock['price'],
-                        OrderSide.BUY
-                    )
-                    
-                    if allow_trade and shares > 0:
-                        print(f"\nPlacing LONG order for {shares} shares of {stock['ticker']}")
-                        order = self.position_manager.place_order(
-                            stock['ticker'], 
-                            shares, 
-                            side=OrderSide.BUY
-                        )
-                        if order:
-                            print(f"Long order placed successfully: {order.id}")
-                    else:
-                        print("\nSkipping long trade - position limits reached")
-                else:
-                    print("\nSkipping long trade - negative momentum")
-        
-        print("\nShort Opportunities (Bottom 10):")
-        for stock in short_candidates:
-            print(f"\n{stock['ticker']}:")
-            print(f"Current Price: ${stock['price']:.2f}")
-            print(f"Social Metrics:")
-            print(f"  Raw Score: {stock['social_score']:.3f}")
-            print(f"  Percentile: {stock['social_percentile']:.1%}")
-            print(f"  Mentions: {stock['mentions']}")
-            print(f"  Sentiment: {stock['sentiment']:.3f}")
-            print(f"  Sources: {stock['sources']}")
+        if strong_bearish_macd:
+            exit_signals.append("Strong bearish MACD signal")
             
-            # Re-analyze with short bias
-            technical_data = analyzer.analyze_stock(stock['ticker'], OrderSide.SELL)
-            if technical_data:
-                print(f"Technical Analysis (Short Bias):")
-                print(f"  Score: {technical_data['score']:.3f}")
-                print(f"  Momentum: {technical_data['momentum']:.1f}%")
-                print("  Signals:")
-                for signal in technical_data['signals']:
-                    print(f"    - {signal}")
-                
-                print(f"Combined Score (Percentile): {stock['combined_score']:.1%}")
-                
-                if technical_data['momentum'] < 0:  # Only short if momentum is negative
-                    shares, allow_trade = self.position_manager.calculate_target_position(
-                        stock['ticker'],
-                        stock['price'],
-                        OrderSide.SELL
-                    )
-                    
-                    if allow_trade and shares > 0:
-                        print(f"\nPlacing SHORT order for {shares} shares of {stock['ticker']}")
-                        order = self.position_manager.place_order(
-                            stock['ticker'],
-                            shares,
-                            side=OrderSide.SELL
-                        )
-                        if order:
-                            print(f"Short order placed successfully: {order.id}")
-                    else:
-                        print("\nSkipping short trade - position limits reached")
-                else:
-                    print("\nSkipping short trade - positive momentum")
+        if momentum < -5:  # >5% loss in 24h
+            exit_signals.append(f"Large price drop: {momentum:.1f}%")
+            
+        # Exit if any two signals are triggered
+        if len(exit_signals) >= 2:
+            print(f"\nExit signals for {symbol}:")
+            for signal in exit_signals:
+                print(f"- {signal}")
+            return True
+            
+        return False
+    
+    def monitor_positions(self, interval_seconds=300):  # 5 minutes
+        """Continuously monitor positions and exit based on technicals"""
+        analyzer = TechnicalAnalyzer()
         
-        # Final position update
-        current_positions = self.position_manager.update_positions()
-        print("\nTrading session complete.")
-
+        while True:
+            positions = self.position_manager.update_positions()
+            if not positions:
+                print("No positions to monitor")
+                break
+                
+            print("\nMonitoring positions...")
+            for symbol in list(positions.keys()):
+                technical_data = analyzer.analyze_stock(symbol)
+                if technical_data:
+                    if self.should_exit_position(symbol, technical_data):
+                        print(f"\nExiting {symbol} based on technical signals")
+                        self.position_manager.close_position(symbol)
+                        
+            time.sleep(interval_seconds)
+    
     def analyze_and_trade(self):
-        """Main trading function - two-step process"""
+        """Main trading function - three-step process"""
         # Initialize analyzer
         analyzer = TechnicalAnalyzer()
         
@@ -252,9 +197,9 @@ class Trader:
         # Step 2: Find new opportunities
         self.find_new_opportunities(analyzer)
         
-        # Final position update
-        self.position_manager.update_positions()
-        print("\nTrading session complete.")
+        # Step 3: Start monitoring loop
+        print("\nStarting position monitor...")
+        self.monitor_positions()
 
 def main():
     trader = Trader()

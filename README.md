@@ -1,114 +1,96 @@
-# Hype Trading Bot
+# AI Trader
 
-An automated trading bot that combines social sentiment analysis with technical indicators and momentum to identify and trade potential breakout stocks.
+Automated trading system that combines social sentiment and technical analysis to identify and trade trending stocks.
 
-## Features
+## Strategy
 
-- Multi-source stock screening:
-  - Reddit WSB sentiment via SwaggyStocks
-  - ApeWisdom for broader Reddit stock mentions
-  - Stocktwits trending stocks
-- Combines technical screening with social sentiment analysis
-- Technical Analysis:
-  - Simple Moving Averages (20 and 50 day)
-  - Relative Strength Index (RSI)
-  - Moving Average Convergence Divergence (MACD)
-  - Bollinger Bands
-  - Price Momentum
-- Position Management:
-  - Side-specific technical analysis for longs/shorts
-  - Momentum-based entry and exit criteria
-  - Dynamic exposure management
-  - Automatic position closure based on:
-    * Technical signals
-    * Price momentum
-    * Stop losses
-    * Position age
-    * Total exposure limits
-- Risk Management:
-  - Maximum 8% exposure per position
-  - Gradual position building (2% steps)
-  - Maximum 160% total exposure (80% long + 80% short)
-  - Momentum confirmation required for new positions
-  - Stricter thresholds when near max exposure
-- Executes trades automatically through Alpaca's paper trading API
-- Handles market hours gracefully with pending order tracking
+### Entry Criteria
+1. Stock appears in top 10 by combined ranking:
+   - Get sentiment ranks (1-20) from both sources:
+     * ApeWisdom: Ranked by mentions and sentiment
+     * Stocktwits: Ranked by bullish ratio * log(mentions)  (requires >60% bullish)
+   - Take best rank between sources (or average if in both)
+   - Get technical rank (1-N) based on:
+     * Moving averages
+     * MACD
+     * RSI
+     * Momentum
+   - Final rank = sentiment_rank + technical_rank
+   - Lower is better (e.g. rank 1 sentiment + rank 1 technicals = best score of 2)
+2. Technical score > 40%
+3. Not already in portfolio
+4. Places 8% position size order
+
+### Exit Criteria
+Exits position if any 2 of these signals occur:
+1. Price below both moving averages
+2. Strong bearish MACD
+3. >5% loss in 24h
+
+Also exits if:
+- Falls out of top 10 AND technical score < 40%
+
+### Position Management
+- 8% position size per stock
+- Maximum 10 positions (80% total exposure)
+- Monitors every 5 minutes for:
+  * Exit signals
+  * New opportunities
+  * Technical score changes
 
 ## Setup
 
+1. Install TA-Lib (required for technical analysis):
+   - On Ubuntu/Debian:
+   ```bash
+   sudo apt-get install ta-lib
+   ```
+   - On macOS:
+   ```bash
+   brew install ta-lib
+   ```
 
-1. Install TA-Lib: (C library must be installed before python "ta-lib" wrapper)
-- On Ubuntu/Debian:
-```bash
-sudo apt-install ta-lib
-```
-- On macOS:
-```bash
-brew install ta-lib
-```
-
-2. Install required packages:
+2. Install Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
+3. Create an Alpaca paper trading account:
+   - Sign up at https://app.alpaca.markets/signup
+   - Go to Paper Trading section
+   - Get your API key and secret
 
-
-3. Create an Alpaca paper trading account at https://app.alpaca.markets/signup
-   - Get your API key and secret from the dashboard
-
-4. Copy the environment variables template:
-```bash
-cp .env.example .env
+4. Create .env file with your Alpaca credentials:
+```
+ALPACA_API_KEY=your_key_here
+ALPACA_SECRET_KEY=your_secret_here
 ```
 
-5. Edit `.env` and add your Alpaca API credentials:
-```
-ALPACA_API_KEY=your_api_key_here
-ALPACA_SECRET_KEY=your_secret_key_here
-```
+Note: The system uses paper trading by default for safety. Make sure you're using paper trading API keys, not live trading keys.
 
 ## Usage
 
-Run the main trading script:
+Run the trading loop:
 ```bash
-source .env
-python trader.py
+python run_trader.py
 ```
 
-The bot follows a two-step process:
-
-1. Manage Existing Positions:
-   - Analyze each position with side-specific technical analysis
-   - Check momentum direction against position side
-   - Close positions that meet exit criteria:
-     * Negative momentum for longs (< -2%)
-     * Positive momentum for shorts (> +2%)
-     * Technical signals move against position
-     * Stop loss hit (-5%)
-     * Position age > 5 days with minimal P&L
-     * Over exposure with weak technicals
-
-2. Find New Opportunities:
-   - Screen for trending stocks from social sources
-   - Calculate technical indicators and momentum
-   - Rank stocks by combined social and technical scores
-   - Filter candidates based on:
-     * Long: Above 70th percentile + positive momentum
-     * Short: Below 30th percentile + negative momentum
-     * Stricter thresholds when exposure > 70%
-   - Place orders that will execute when market opens
+This will:
+1. Check existing positions every 5 minutes
+2. Exit positions that trigger signals
+3. Enter new positions from top 10 list
+4. Queue orders for market open if after hours
 
 ## Components
 
-- `social_scanner.py`: Multi-source social sentiment analysis
-  - Reddit WSB sentiment
-  - ApeWisdom stock mentions
-  - Stocktwits trending stocks
-- `technical_analysis.py`: Technical indicators and momentum analysis
-- `position_manager.py`: Position and risk management
-- `trader.py`: Main script orchestrating the trading process
+- `social_scanner.py`: Gets and ranks stocks from:
+  * ApeWisdom (Reddit sentiment)
+  * Stocktwits (watchers + sentiment)
+- `technical_analysis.py`: Technical indicators
+- `position_manager.py`: Order execution and position tracking
+- `trader.py`: Main trading logic
+- `run_trader.py`: Trading loop with 5-minute cycle
 
 ## Risk Warning
 
-This is a paper trading bot for educational purposes. Always thoroughly test trading strategies with paper trading before considering real money trading. While the bot implements various risk management features like position sizing, momentum confirmation, and exposure limits, you should adjust these parameters based on your risk tolerance and strategy.
+This is experimental software for educational purposes. Use paper trading to test strategies before considering real money. The system implements basic risk management through position sizing and technical exit signals, but you should adjust parameters based on your risk tolerance.

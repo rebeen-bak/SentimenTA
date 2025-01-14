@@ -18,23 +18,48 @@ class TechnicalAnalyzer:
         
     def get_historical_data(self, symbol, lookback_days=100):
         """Get historical data from Alpaca"""
-        end = datetime.now()
-        start = end - timedelta(days=lookback_days)
-        
-        request = StockBarsRequest(
-            symbol_or_symbols=[symbol],
-            timeframe=TimeFrame.Day,
-            start=start,
-            end=end
-        )
-        
-        bars = self.client.get_stock_bars(request)
-        df = bars.df
-        
-        if df.empty:
-            return None
+        try:
+            # Get today's date in ET
+            et_tz = datetime.now().astimezone().tzinfo
+            today = datetime.now(et_tz).date()
             
-        return df
+            # Set end to today's market close (4 PM ET)
+            end = datetime.combine(today, datetime.strptime('16:00', '%H:%M').time())
+            end = end.replace(tzinfo=et_tz)
+            
+            # Set start to lookback days before
+            start = end - timedelta(days=lookback_days)
+            
+            print(f"Requesting data from {start} to {end} ET")
+            
+            request = StockBarsRequest(
+                symbol_or_symbols=[symbol],
+                timeframe=TimeFrame.Day,
+                start=start,
+                end=end,
+                adjustment='all'  # Get adjusted prices
+            )
+            
+            bars = self.client.get_stock_bars(request)
+            df = bars.df
+            
+            if df.empty:
+                print(f"No data returned for {symbol}")
+                return None
+            
+            # Print actual date range we got
+            print(f"Got data from {df.index[0]} to {df.index[-1]} ET")
+            
+            # Print last few prices to verify freshness
+            print("\nLast 5 closing prices:")
+            for date, price in df['close'][-5:].items():
+                print(f"{date}: ${price:.2f}")
+            
+            return df
+            
+        except Exception as e:
+            print(f"Error getting data: {str(e)}")
+            return None
     
     def calculate_indicators(self, df):
         """Calculate technical indicators"""
@@ -77,13 +102,21 @@ class TechnicalAnalyzer:
         df = self.calculate_indicators(df)
         print("Indicators calculated successfully")
         
-        # Get latest values and previous values for momentum
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-        week_ago = df.iloc[-5] if len(df) >= 5 else df.iloc[0]
+        # Get latest values
+        latest = df.iloc[-1]  # Today's close
+        prev = df.iloc[-2]    # Yesterday's close
         
-        print("\nLatest values:")
-        print(f"Price: ${latest['close']:.2f}")
+        # Calculate 24h changes to match ApeWisdom timeframe
+        price_24h_change = ((latest['close'] / prev['close']) - 1) * 100
+        mentions_24h_change = None  # We'll get this from ApeWisdom
+        
+        print("\nPrice Data (24h Changes):")
+        print(f"Latest close: ${latest['close']:.2f}")
+        print(f"Previous close: ${prev['close']:.2f}")
+        print(f"24h Change: {price_24h_change:+.2f}%")
+        print(f"Date range: {df.index[0]} to {df.index[-1]}")
+        
+        print("\nIndicators:")
         print(f"RSI: {latest['RSI']:.2f}")
         print(f"MACD: {latest['MACD']:.3f} vs Signal: {latest['MACD_Signal']:.3f}")
         print(f"20 SMA: {latest['SMA_20']:.2f} vs 50 SMA: {latest['SMA_50']:.2f}")
@@ -94,27 +127,28 @@ class TechnicalAnalyzer:
             'signals': [],
             'raw_score': 0,  # Raw technical score (-100 to 100)
             'score': 0,      # Normalized score (0 to 1)
-            'momentum': 0    # Price momentum (percent change)
+            'momentum': price_24h_change  # 24h price change
         }
         
-        # Calculate momentum
-        signals['momentum'] = ((latest['close'] / week_ago['close']) - 1) * 100
+        # Price must be above both moving averages for bullish
+        price = latest['close']
+        sma20 = latest['SMA_20']
+        sma50 = latest['SMA_50']
         
-        # Trend Analysis
-        if latest['SMA_20'] > latest['SMA_50']:
-            if side != OrderSide.SELL:  # Bullish or neutral analysis
-                signals['signals'].append("Bullish trend: 20 SMA above 50 SMA")
-                signals['score'] += 20
-            else:  # Short analysis - bearish signal
-                signals['signals'].append("Warning: 20 SMA above 50 SMA (uptrend)")
-                signals['score'] -= 20
-        else:
-            if side != OrderSide.BUY:  # Bearish or neutral analysis
-                signals['signals'].append("Bearish trend: 20 SMA below 50 SMA")
-                signals['score'] -= 20
-            else:  # Long analysis - bearish signal
-                signals['signals'].append("Warning: 20 SMA below 50 SMA (downtrend)")
-                signals['score'] += 20
+        if price > sma20 and price > sma50:
+            if sma20 > sma50:  # Perfect uptrend
+                signals['signals'].append("Strong bullish trend: Price > 20 SMA > 50 SMA")
+                signals['score'] += 30
+            else:  # Price above but mixed MAs
+                signals['signals'].append("Mixed trend: Price above MAs but 20 SMA < 50 SMA")
+                signals['score'] += 10
+        else:  # Price below either MA
+            if price < sma20 and price < sma50:
+                signals['signals'].append("Bearish trend: Price below both MAs")
+                signals['score'] -= 30
+            else:
+                signals['signals'].append("Mixed trend: Price between MAs")
+                signals['score'] -= 10
         
         # RSI Analysis
         if 30 <= latest['RSI'] <= 70:
@@ -134,21 +168,28 @@ class TechnicalAnalyzer:
                 signals['signals'].append(f"Warning: RSI overbought at {latest['RSI']:.2f}")
                 signals['score'] += 15
         
-        # MACD Analysis
-        if latest['MACD'] > latest['MACD_Signal'] and prev['MACD'] <= prev['MACD_Signal']:
-            if side != OrderSide.SELL:  # Bullish or neutral analysis
-                signals['signals'].append("Bullish MACD crossover")
-                signals['score'] += 25
-            else:  # Short analysis - reversal warning
-                signals['signals'].append("Warning: Bullish MACD crossover")
-                signals['score'] -= 25
-        elif latest['MACD'] < latest['MACD_Signal'] and prev['MACD'] >= prev['MACD_Signal']:
-            if side != OrderSide.BUY:  # Bearish or neutral analysis
-                signals['signals'].append("Bearish MACD crossover")
-                signals['score'] -= 25
-            else:  # Long analysis - reversal warning
-                signals['signals'].append("Warning: Bearish MACD crossover")
-                signals['score'] += 25
+        # MACD Analysis - require strong signals
+        macd = latest['MACD']
+        signal = latest['MACD_Signal']
+        macd_diff = macd - signal  # Difference between MACD and signal
+        
+        if abs(macd_diff) < 0.1:  # Very close - no clear signal
+            signals['signals'].append("Weak MACD signal")
+            signals['score'] -= 10
+        elif macd > signal:
+            if macd_diff > 0.5:  # Strong bullish
+                signals['signals'].append("Strong bullish MACD")
+                signals['score'] += 30
+            else:  # Weak bullish
+                signals['signals'].append("Weak bullish MACD")
+                signals['score'] += 10
+        else:  # MACD below signal
+            if macd_diff < -0.5:  # Strong bearish
+                signals['signals'].append("Strong bearish MACD")
+                signals['score'] -= 30
+            else:  # Weak bearish
+                signals['signals'].append("Weak bearish MACD")
+                signals['score'] -= 10
         
         # Bollinger Bands Analysis
         if latest['close'] < latest['BB_Lower']:
@@ -166,11 +207,19 @@ class TechnicalAnalyzer:
                 signals['signals'].append("Warning: Price above upper Bollinger Band")
                 signals['score'] += 15
         
-        # Add momentum to score
-        if side == OrderSide.BUY:
-            signals['score'] += (signals['momentum'] > 0) * 20  # Bonus for positive momentum
-        elif side == OrderSide.SELL:
-            signals['score'] += (signals['momentum'] < 0) * 20  # Bonus for negative momentum
+        # 24h momentum analysis
+        if signals['momentum'] > 2:  # >2% gain
+            signals['signals'].append(f"Strong 24h gain: {signals['momentum']:.1f}%")
+            signals['score'] += 30
+        elif signals['momentum'] > 0:  # Any gain
+            signals['signals'].append(f"24h gain: {signals['momentum']:.1f}%")
+            signals['score'] += 15
+        elif signals['momentum'] > -2:  # Small loss
+            signals['signals'].append(f"Small 24h loss: {signals['momentum']:.1f}%")
+            signals['score'] -= 15
+        else:  # >2% loss
+            signals['signals'].append(f"Large 24h loss: {signals['momentum']:.1f}%")
+            signals['score'] -= 30
             
         # Normalize score from -100,100 to 0,1 range
         signals['raw_score'] = signals['score']

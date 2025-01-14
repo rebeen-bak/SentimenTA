@@ -121,9 +121,14 @@ class PositionManager:
             print(f"Error updating positions: {str(e)}")
             return {}
     
-    def calculate_target_position(self, symbol, price, side):
+    def calculate_target_position(self, symbol, price, side, target_pct=None):
         """
         Calculate target position size considering existing positions
+        Args:
+            symbol: Stock symbol
+            price: Current price
+            side: OrderSide.BUY or OrderSide.SELL
+            target_pct: Target position size as % of equity (e.g. 0.08 for 8%)
         Returns target shares and whether to allow the trade
         """
         account = self.get_account_info()
@@ -139,17 +144,18 @@ class PositionManager:
             print(f"Maximum total exposure reached: {total_exposure:.1%}")
             return 0, False
         
-        # Calculate available position size
-        target_position_value = equity * self.max_position_size
+        # Use provided target_pct or default max_position_size
+        position_size = target_pct if target_pct is not None else self.max_position_size
+        target_position_value = equity * position_size
         current_position = active_positions.get(symbol)
         
         if current_position:
             # Position exists - check if we should add more
             current_exposure = current_position.get_exposure(equity)
             
-            # Don't add if already at max size
-            if current_exposure >= self.max_position_size:
-                print(f"Maximum position size reached for {symbol}: {current_exposure:.1%}")
+            # Don't add if already at target size
+            if current_exposure >= position_size:
+                print(f"Target position size reached for {symbol}: {current_exposure:.1%}")
                 return 0, False
             
             # Don't add if position moving against us
@@ -157,17 +163,15 @@ class PositionManager:
                 print(f"Position moving against us: {current_position.pl_pct:.1%} P&L")
                 return 0, False
             
-            # Calculate room for addition
+            # Calculate remaining size to reach target
             remaining_size = target_position_value - (current_position.qty * price)
-            step_size = equity * self.position_step_size
-            target_addition = min(remaining_size, step_size)
-            
-            return int(target_addition / price), True
+            return int(remaining_size / price), True
             
         else:
-            # New position - start with one step
-            step_size = equity * self.position_step_size
-            return int(step_size / price), True
+            # New position - use full target size
+            target_shares = int(target_position_value / price)
+            print(f"New {position_size:.1%} position: {target_shares} shares @ ${price:.2f}")
+            return target_shares, True
     
     def should_close_position(self, symbol, technical_data):
         """Determine if a position should be closed based on technical analysis"""
