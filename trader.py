@@ -30,6 +30,10 @@ class Trader:
     
     def find_new_opportunities(self, analyzer):
         """Find and execute new trades"""
+        # Update positions and orders silently
+        self.position_manager.positions = self.position_manager.update_positions(show_status=False)
+        self.position_manager.update_pending_orders()
+        
         # Get ranked stocks
         scanner = SocialScanner()
         df = scanner.get_trending_stocks()
@@ -55,31 +59,42 @@ class Trader:
                     print(f"\nSELL {symbol}: Fell out of top 10, weak technicals")
                     self.position_manager.close_position(symbol)
         
-        # Enter new positions
-        for _, stock in top_stocks.iterrows():
-            ticker = stock['ticker']
-            if ticker in current_positions:
-                print(f"\nSkipping {ticker} - already in portfolio")
-                continue
-            if ticker in pending_orders:
-                print(f"\nSkipping {ticker} - order already pending")
-                continue
-            
-            technical_data = analyzer.analyze_stock(ticker)
-            if not technical_data or technical_data['score'] < 0.4:
-                continue
-            
-            shares, allow_trade = self.position_manager.calculate_target_position(
-                ticker,
-                technical_data['price'],
-                OrderSide.BUY,
-                target_pct=0.08
-            )
-            
-            if allow_trade and shares > 0:
-                print(f"\nBUY {ticker}: Rank {stock['final_rank']:.1f} (Sentiment: {stock['sentiment_rank']:.1f}, TA: {stock['ta_rank']:.0f})")
-                print(f"Order: {shares} shares @ ${technical_data['price']:.2f}")
-                self.position_manager.place_order(ticker, shares, side=OrderSide.BUY)
+        # Enter new positions only if not at max exposure
+        account = self.position_manager.get_account_info()
+        total_exposure = sum(p.get_exposure(account['equity']) 
+                           for p in self.position_manager.positions.values())
+        
+        if total_exposure < self.position_manager.max_total_exposure:
+            for _, stock in top_stocks.iterrows():
+                ticker = stock['ticker']
+                
+                # Skip if we already have position or pending order
+                if ticker in current_positions:
+                    print(f"\nSkipping {ticker} - already in portfolio")
+                    continue
+                if ticker in pending_orders:
+                    print(f"\nSkipping {ticker} - order already pending")
+                    continue
+                
+                # Check technicals
+                technical_data = analyzer.analyze_stock(ticker)
+                if not technical_data or technical_data['score'] < 0.4:
+                    continue
+                
+                # Calculate position size
+                shares, allow_trade = self.position_manager.calculate_target_position(
+                    ticker,
+                    technical_data['price'],
+                    OrderSide.BUY,
+                    target_pct=0.08
+                )
+                
+                if allow_trade and shares > 0:
+                    print(f"\nBUY {ticker}: Rank {stock['final_rank']:.1f} (Sentiment: {stock['sentiment_rank']:.1f}, TA: {stock['ta_rank']:.0f})")
+                    print(f"Order: {shares} shares @ ${technical_data['price']:.2f}")
+                    self.position_manager.place_order(ticker, shares, side=OrderSide.BUY)
+        else:
+            print(f"\nSkipping new positions - at max exposure ({total_exposure:.1%})")
     
     def should_exit_position(self, symbol, technical_data):
         """Check exit signals"""
@@ -118,6 +133,11 @@ class Trader:
     def analyze_and_trade(self):
         """Main trading loop"""
         analyzer = TechnicalAnalyzer()
+        
+        # Show initial portfolio status
+        self.position_manager.update_positions(show_status=True)
+        
+        # Run trading cycle
         self.manage_existing_positions(analyzer)
         self.find_new_opportunities(analyzer)
         self.monitor_positions()

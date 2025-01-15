@@ -51,15 +51,24 @@ class PositionManager:
         self.update_pending_orders()
     
     def update_pending_orders(self):
-        """Update list of pending orders"""
+        """Update list of pending orders, removing executed ones"""
         try:
+            # Get all open orders
             orders = self.trading_client.get_orders()
-            self.pending_orders = [{
-                'symbol': order.symbol,
-                'shares': float(order.qty),
-                'side': order.side,
-                'order_id': order.id
-            } for order in orders]
+            
+            # Clear old pending orders
+            self.pending_orders = []
+            
+            # Only track orders that are still pending
+            for order in orders:
+                if order.status in ['new', 'accepted', 'pending']:
+                    self.pending_orders.append({
+                        'symbol': order.symbol,
+                        'shares': float(order.qty),
+                        'side': order.side,
+                        'order_id': order.id
+                    })
+                    
         except Exception as e:
             print(f"Error updating orders: {str(e)}")
     
@@ -74,8 +83,11 @@ class PositionManager:
             'daytrading_buying_power': float(account.daytrading_buying_power)
         }
     
-    def update_positions(self):
-        """Update position tracking with current market data"""
+    def update_positions(self, show_status=True):
+        """Update position tracking with current market data
+        Args:
+            show_status: Whether to print current portfolio status
+        """
         try:
             alpaca_positions = self.trading_client.get_all_positions()
             current_symbols = set()
@@ -112,21 +124,22 @@ class PositionManager:
             total_exposure = sum(p.get_exposure(account['equity']) 
                                for p in active_positions.values())
             
-            print("\nCurrent Portfolio Status:")
-            print(f"Total Exposure: {total_exposure:.1%}")
-            for pos in active_positions.values():
-                exposure = pos.get_exposure(account['equity'])
-                print(f"{pos} ({exposure:.1%} exposure)")
-            
-            if self.pending_closes:
-                print("\nPending Close Orders:")
-                for symbol in self.pending_closes:
-                    print(f"- {symbol}")
-            
-            if self.pending_orders:
-                print("\nPending New Orders:")
-                for order in self.pending_orders:
-                    print(f"- {order['symbol']} ({order['side']})")
+            if show_status:
+                print("\nCurrent Portfolio Status:")
+                print(f"Total Exposure: {total_exposure:.1%}")
+                for pos in active_positions.values():
+                    exposure = pos.get_exposure(account['equity'])
+                    print(f"{pos} ({exposure:.1%} exposure)")
+                
+                if self.pending_closes:
+                    print("\nPending Close Orders:")
+                    for symbol in self.pending_closes:
+                        print(f"- {symbol}")
+                
+                if self.pending_orders:
+                    print("\nPending New Orders:")
+                    for order in self.pending_orders:
+                        print(f"- {order['symbol']} ({order['side']})")
                 
             return self.positions
             
@@ -250,12 +263,18 @@ class PositionManager:
         )
         
         try:
-            # Place order
+            # Place order and track status
             order = self.trading_client.submit_order(order_details)
-            
-            # Update pending orders list
-            self.update_pending_orders()
-            print(f"Order queued: {shares} shares of {symbol}")
+            if order.status in ['new', 'accepted', 'pending']:
+                self.pending_orders.append({
+                    'symbol': symbol,
+                    'shares': shares,
+                    'side': side,
+                    'order_id': order.id
+                })
+                print(f"Order queued: {shares} shares of {symbol}")
+            else:
+                print(f"Order executed: {shares} shares of {symbol}")
             
             return order
         except Exception as e:
@@ -264,15 +283,46 @@ class PositionManager:
             print(f"Error message: {str(e)}")
             return None
     
+    def check_position_available(self, symbol):
+        """Check if position is available to close"""
+        try:
+            # Get all positions
+            positions = self.trading_client.get_all_positions()
+            
+            # Find this position
+            for pos in positions:
+                if pos.symbol == symbol:
+                    if float(pos.qty_available) == 0:
+                        print(f"Skipping {symbol} - all shares held for orders")
+                        return False
+                    return True
+                    
+            print(f"Position not found: {symbol}")
+            return False
+            
+        except Exception as e:
+            print(f"Error checking position {symbol}: {str(e)}")
+            return False
+    
     def close_position(self, symbol):
         """Close an existing position"""
+        # Skip if already pending close or shares held
+        if symbol in self.pending_closes:
+            print(f"Skipping {symbol} - close order already pending")
+            return None
+        
+        if not self.check_position_available(symbol):
+            return None
+            
         try:
             order = self.trading_client.close_position(symbol)
             if order.status == 'accepted':
                 self.pending_closes.add(symbol)
                 print(f"Close order queued: {symbol}")
+                return order
                 
         except Exception as e:
             print(f"\nError closing position in {symbol}:")
             print(f"Error type: {type(e).__name__}")
             print(f"Error message: {str(e)}")
+            return None
