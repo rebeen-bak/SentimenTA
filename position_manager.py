@@ -15,12 +15,20 @@ class Position:
         self.target_qty = float(qty)  # For gradual position building/reduction
         self.pl_pct = 0  # Current P&L percentage
         self.current_price = entry_price
+        self.high_water_mark = entry_price  # Track highest price reached
         
     def update_pl(self, current_price):
-        """Update position P&L"""
+        """Update position P&L and high water mark"""
         self.current_price = float(current_price)
         multiplier = 1 if self.side == OrderSide.BUY else -1
         self.pl_pct = ((self.current_price / self.entry_price) - 1) * multiplier
+        
+        # Update high water mark if price is higher
+        if self.current_price > self.high_water_mark:
+            self.high_water_mark = self.current_price
+            
+        # Calculate drawdown from high
+        self.drawdown = ((self.current_price / self.high_water_mark) - 1) * 100
         
     def get_exposure(self, equity):
         """Calculate position exposure as percentage of equity"""
@@ -46,9 +54,31 @@ class PositionManager:
         self.position_step_size = 0.02  # 2% per trade for gradual building
         self.max_total_exposure = 1.6  # 160% total exposure (80% long + 80% short)
         
+        # Position entry times (persist between runs)
+        self.position_times = {}  # symbol -> entry time
+        
+        # Load position times from file if exists
+        self.load_position_times()
+        
         # Initialize current positions and pending orders
         self.update_positions()
         self.update_pending_orders()
+        
+    def load_position_times(self):
+        """Load position entry times from file"""
+        try:
+            with open('position_times.txt', 'r') as f:
+                for line in f:
+                    symbol, timestamp = line.strip().split(',')
+                    self.position_times[symbol] = datetime.fromtimestamp(float(timestamp))
+        except FileNotFoundError:
+            pass
+            
+    def save_position_times(self):
+        """Save position entry times to file"""
+        with open('position_times.txt', 'w') as f:
+            for symbol, entry_time in self.position_times.items():
+                f.write(f"{symbol},{entry_time.timestamp()}\n")
     
     def update_pending_orders(self):
         """Update list of pending orders, removing executed ones"""
@@ -101,11 +131,39 @@ class PositionManager:
                 entry_price = float(p.avg_entry_price)
                 side = OrderSide.BUY if qty > 0 else OrderSide.SELL
                 
+                # Try to get entry time from saved times or order history
+                if symbol in self.position_times:
+                    entry_time = self.position_times[symbol]
+                else:
+                    # Try to find original order time
+                    try:
+                        orders = self.trading_client.get_orders(
+                            status='filled',
+                            symbols=[symbol],
+                            side=side,
+                            limit=1,
+                            nested=True  # Include nested orders
+                        )
+                        if orders:
+                            # Get earliest filled order
+                            entry_time = min(
+                                datetime.fromisoformat(order.filled_at.replace('Z', '+00:00'))
+                                for order in orders
+                                if order.filled_at
+                            )
+                        else:
+                            entry_time = datetime.now()
+                    except Exception:
+                        entry_time = datetime.now()
+                    
+                    self.position_times[symbol] = entry_time
+                    self.save_position_times()
+                
                 if symbol not in self.positions:
-                    # New position
+                    # New position with stored entry time
                     self.positions[symbol] = Position(
-                        symbol, qty, entry_price, side, 
-                        datetime.now()  # Approximate entry time for existing positions
+                        symbol, qty, entry_price, side,
+                        self.position_times[symbol]
                     )
                 
                 # Update position data
@@ -114,7 +172,15 @@ class PositionManager:
                 pos.entry_price = entry_price
                 pos.update_pl(current_price)
             
-            # Remove closed positions
+            # Remove closed positions and their times
+            closed_positions = set(self.positions.keys()) - current_symbols
+            for symbol in closed_positions:
+                self.positions.pop(symbol)
+                if symbol in self.position_times:
+                    self.position_times.pop(symbol)
+                    self.save_position_times()
+            
+            # Update positions dict
             self.positions = {s: p for s, p in self.positions.items() if s in current_symbols}
             
             # Calculate total exposure excluding pending closes
@@ -129,7 +195,9 @@ class PositionManager:
                 print(f"Total Exposure: {total_exposure:.1%}")
                 for pos in active_positions.values():
                     exposure = pos.get_exposure(account['equity'])
-                    print(f"{pos} ({exposure:.1%} exposure)")
+                    age_hours = (datetime.now() - pos.entry_time).total_seconds() / 3600
+                    age_str = f"{age_hours:.1f}h" if age_hours < 24 else f"{age_hours/24:.1f}d"
+                    print(f"{pos} ({exposure:.1%} exposure, {age_str} old, {pos.drawdown:.1f}% from high)")
                 
                 if self.pending_closes:
                     print("\nPending Close Orders:")
@@ -147,14 +215,16 @@ class PositionManager:
             print(f"Error updating positions: {str(e)}")
             return {}
     
-    def calculate_target_position(self, symbol, price, side, target_pct=None):
+    def calculate_target_position(self, symbol, price, side, target_pct=None, technical_data=None, sentiment_data=None):
         """
-        Calculate target position size considering existing positions
+        Calculate target position size considering risk factors
         Args:
             symbol: Stock symbol
             price: Current price
             side: OrderSide.BUY or OrderSide.SELL
-            target_pct: Target position size as % of equity (e.g. 0.08 for 8%)
+            target_pct: Base target size as % of equity (e.g. 0.08 for 8%)
+            technical_data: Technical analysis data
+            sentiment_data: Social sentiment data
         Returns target shares and whether to allow the trade
         """
         account = self.get_account_info()
@@ -170,8 +240,21 @@ class PositionManager:
             print(f"Maximum total exposure reached: {total_exposure:.1%}")
             return 0, False
         
-        # Use provided target_pct or default max_position_size
+        # Start with base position size
         position_size = target_pct if target_pct is not None else self.max_position_size
+        
+        # Adjust size based on technical strength (0.4 to 1.0 multiplier)
+        if technical_data:
+            tech_multiplier = max(0.4, technical_data['score'])
+            position_size *= tech_multiplier
+            
+        # Adjust for sentiment strength if available
+        if sentiment_data:
+            # Higher rank = smaller size
+            rank_multiplier = max(0.5, 1.0 - (sentiment_data['final_rank'] / 40))
+            position_size *= rank_multiplier
+            
+        # Calculate value with adjusted size
         target_position_value = equity * position_size
         current_position = active_positions.get(symbol)
         
@@ -196,7 +279,6 @@ class PositionManager:
         else:
             # New position - use full target size
             target_shares = int(target_position_value / price)
-            print(f"New {position_size:.1%} position: {target_shares} shares @ ${price:.2f}")
             return target_shares, True
     
     def should_close_position(self, symbol, technical_data):
@@ -272,9 +354,30 @@ class PositionManager:
                     'side': side,
                     'order_id': order.id
                 })
-                print(f"Order queued: {shares} shares of {symbol}")
+                # Calculate position size as % of equity
+                account_info = self.get_account_info()
+                # Use first available price
+                order_price = None
+                for price_field in [order.filled_avg_price, order.limit_price, order.notional]:
+                    if price_field is not None:
+                        order_price = float(price_field)
+                        break
+                
+                if order_price is None:
+                    print(f"Order queued: {shares} shares of {symbol}")
+                else:
+                    position_value = shares * order_price
+                    position_pct = (position_value / account_info['equity']) * 100
+                    print(f"Order queued: {shares} shares of {symbol} ({position_pct:.1f}% position)")
             else:
-                print(f"Order executed: {shares} shares of {symbol}")
+                # Calculate executed position size if price available
+                account_info = self.get_account_info()
+                if order.filled_avg_price:
+                    position_value = shares * float(order.filled_avg_price)
+                    position_pct = (position_value / account_info['equity']) * 100
+                    print(f"Order executed: {shares} shares of {symbol} ({position_pct:.1f}% position)")
+                else:
+                    print(f"Order executed: {shares} shares of {symbol}")
             
             return order
         except Exception as e:
