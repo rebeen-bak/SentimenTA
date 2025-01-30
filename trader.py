@@ -12,6 +12,13 @@ class Trader:
     def __init__(self):
         self.position_manager = PositionManager()
     
+    def is_market_open_period(self):
+        """Check if we're in the first 30 minutes of market open"""
+        now = datetime.now()
+        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        minutes_since_open = (now - market_open).total_seconds() / 60
+        return 0 <= minutes_since_open < 30
+    
     def manage_existing_positions(self, analyzer):
         """Manage existing positions"""
         current_positions = self.position_manager.update_positions()
@@ -73,10 +80,15 @@ class Trader:
             elif position_age > 24:  # At least 24h old
                 # Exit if ALL conditions met:
                 if (technical_data['score'] < 0.5 and  # Weaker technicals
-                    abs(position.pl_pct) < 0.03 and    # Little movement
+                    abs(position.pl_pct) < 3 and    # Little movement (now in percentage)
                     symbol not in target_symbols):      # Not in top 10
                     print(f"\nSELL {symbol}: Stale position ({position_age:.1f}h old, rank {df[df['ticker'] == symbol].iloc[0]['final_rank']:.1f})")
                     self.position_manager.close_position(symbol)
+        
+        # Check if we're in market open period - only allow sells
+        if self.is_market_open_period():
+            print("\nSkipping new positions - in first 30 minutes of market open")
+            return
         
         # Enter new positions only if not at max exposure
         account = self.position_manager.get_account_info()
@@ -161,7 +173,7 @@ class Trader:
         if position_age_mins < 30:  # 30-min protection period
             # Only exit if:
             # 1. Hard stop hit (-10% from entry)
-            if position.pl_pct < -10:
+            if position.pl_pct < -10:  # pl_pct is now in percentage form
                 exit_signals.append(f"Hard stop: {position.pl_pct:.1f}% loss")
                 technical_data['exit_signals'] = exit_signals
                 return True
@@ -176,7 +188,7 @@ class Trader:
             return False
         
         # 1. Protect Profits - Tighten stops as profit grows
-        if position.pl_pct > 0.10:  # In +10% profit
+        if position.pl_pct > 10:  # In +10% profit (now in percentage)
             if position.drawdown < -5:  # Tighter 5% trailing stop
                 exit_signals.append(f"Profit protection: {position.drawdown:.1f}% drop from high while +{position.pl_pct:.1f}% up")
                 technical_data['exit_signals'] = exit_signals
@@ -188,7 +200,7 @@ class Trader:
             
         # 2. Quick Momentum Shifts - Only exit if significant drop
         if momentum < -5:
-            if position.pl_pct > 0.05:  # Need 5% profit to use quick exit
+            if position.pl_pct > 5:  # Need 5% profit to use quick exit (now in percentage)
                 exit_signals.append(f"Momentum reversal: {momentum:.1f}% drop while +{position.pl_pct:.1f}% up")
                 technical_data['exit_signals'] = exit_signals
                 return True

@@ -21,7 +21,8 @@ class Position:
         """Update position P&L and high water mark"""
         self.current_price = float(current_price)
         multiplier = 1 if self.side == OrderSide.BUY else -1
-        self.pl_pct = ((self.current_price / self.entry_price) - 1) * multiplier
+        # Convert to percentage
+        self.pl_pct = ((self.current_price / self.entry_price) - 1) * multiplier * 100
         
         # Update high water mark if price is higher
         if self.current_price > self.high_water_mark:
