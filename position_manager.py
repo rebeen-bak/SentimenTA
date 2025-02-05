@@ -46,6 +46,7 @@ class PositionManager:
         api_key = os.getenv('ALPACA_API_KEY')
         api_secret = os.getenv('ALPACA_SECRET_KEY')
         self.trading_client = TradingClient(api_key, api_secret, paper=True)
+        self.market_close_check_done = False  # Flag to track if we've done the end-of-day close
         self.positions = {}  # symbol -> Position object
         self.pending_closes = set()  # Symbols with pending close orders
         self.pending_orders = []  # List of pending new position orders
@@ -114,12 +115,38 @@ class PositionManager:
             'daytrading_buying_power': float(account.daytrading_buying_power)
         }
     
+    def is_near_market_close(self):
+        """Check if we're within 30 minutes of market close"""
+        try:
+            clock = self.trading_client.get_clock()
+            if not clock.is_open:
+                return False
+            
+            closing_time = clock.next_close.timestamp()
+            current_time = clock.timestamp.timestamp()
+            time_until_close = closing_time - current_time
+            
+            # Return True if less than 30 minutes until close
+            return time_until_close <= 1800  # 30 minutes in seconds
+        except Exception as e:
+            print(f"Error checking market close time: {str(e)}")
+            return False
+
     def update_positions(self, show_status=True):
         """Update position tracking with current market data
         Args:
             show_status: Whether to print current portfolio status
         """
         try:
+            # Check if we need to close all positions due to market close
+            if not self.market_close_check_done and self.is_near_market_close():
+                print("\nClosing all positions - 30 minutes before market close")
+                alpaca_positions = self.trading_client.get_all_positions()
+                for position in alpaca_positions:
+                    self.close_position(position.symbol)
+                self.market_close_check_done = True
+                return self.positions
+
             alpaca_positions = self.trading_client.get_all_positions()
             current_symbols = set()
             
