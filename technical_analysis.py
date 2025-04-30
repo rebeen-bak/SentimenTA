@@ -47,6 +47,7 @@ class TechnicalAnalyzer:
     
     def calculate_indicators(self, df):
         """Calculate technical indicators"""
+        # Adding ATR - Average True Range as an additional indicator
         # Convert multi-index to single index
         df = df.reset_index(level=1, drop=True)
         
@@ -65,6 +66,10 @@ class TechnicalAnalyzer:
         df['BB_Upper'] = upper
         df['BB_Middle'] = middle
         df['BB_Lower'] = lower
+
+        # ATR
+        # Default timeperiod for ATR is 14
+        df['ATR'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
         
         return df
     
